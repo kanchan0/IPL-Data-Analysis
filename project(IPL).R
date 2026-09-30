@@ -3,7 +3,7 @@ library(readr)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
-library(tidyverse)
+
 library(treemap)
 library(RColorBrewer)
 library(caret)        # for predictive modeling
@@ -271,32 +271,40 @@ ggsave("Plots/Confusion_Matrix.png", plot = p_conf, width = 12, height = 8, dpi 
 
 ############# Predict runs scored by batsmen #############
 deliveries_model <- deliveries %>%
-  left_join(matches %>% select(id, season), by = c("match_id"="id")) %>%
-  filter(!is.na(batsman_runs))
+  inner_join(matches %>% select(id, season), by = c("match_id" = "id")) %>%
+  filter(!is.na(batsman_runs), !is.na(over), !is.na(season),
+         !is.na(batting_team), !is.na(bowling_team), !is.na(bowler))
 
-factor_cols <- c("batting_team", "bowling_team", "batsman", "bowler", "season")
+# randomForest only allows factors with <= 53 levels: keep the top 50 bowlers, lump the rest
+top_b <- names(sort(table(deliveries_model$bowler), decreasing = TRUE))[1:50]
+deliveries_model$bowler <- ifelse(deliveries_model$bowler %in% top_b,
+                                  as.character(deliveries_model$bowler), "Other")
+
+# Sample for speed (the full ~150k rows is slow for a first run)
+set.seed(123)
+deliveries_model <- deliveries_model[sample(nrow(deliveries_model), 50000), ]
+
+factor_cols <- c("batting_team", "bowling_team", "bowler", "season")
 deliveries_model <- deliveries_model %>%
   mutate(across(all_of(factor_cols), as.factor))
 
-set.seed(123)
 train_idx <- createDataPartition(deliveries_model$batsman_runs, p = 0.8, list = FALSE)
 train_del <- deliveries_model[train_idx, ]
-test_del <- deliveries_model[-train_idx, ]
+test_del  <- deliveries_model[-train_idx, ]
 
-# Align factor levels in test to train
 for (col in factor_cols) {
   test_del[[col]] <- factor(test_del[[col]], levels = levels(train_del[[col]]))
 }
+test_del <- test_del %>% filter(if_all(all_of(factor_cols), ~ !is.na(.x)))
 
 rf_runs_model <- randomForest(
   batsman_runs ~ batting_team + bowling_team + over + bowler + season,
   data = train_del,
-  ntree = 500
+  ntree = 100
 )
 
 runs_pred <- predict(rf_runs_model, test_del)
-test_del <- test_del %>% mutate(runs_pred = runs_pred) %>% 
-  filter(!is.na(runs_pred) & !is.na(batsman_runs))
+test_del$runs_pred <- runs_pred
 
 p_pred <- ggplot(test_del, aes(runs_pred, batsman_runs)) +
   geom_point(alpha = 0.5) +
@@ -304,8 +312,7 @@ p_pred <- ggplot(test_del, aes(runs_pred, batsman_runs)) +
   theme_classic(base_size = 14) +
   labs(x = "Predicted Runs", y = "Actual Runs", title = "Random Forest Prediction of Batsman Runs")
 
-ggsave("Plots/Predicted_vs_Actual_Runs.png", plot = p_pred, width = 8, height = 6, dpi = 300, bg="white")
-
+ggsave("Plots/Predicted_vs_Actual_Runs.png", plot = p_pred, width = 8, height = 6, dpi = 300, bg = "white")
 ############# Top partnerships network #############
 partnerships <- deliveries %>%
   filter(!is.na(player_dismissed)) %>%
